@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -81,9 +82,10 @@ func rfc4514ish(rdns *pkix.RDNSequence) string {
 }
 
 func main() {
-	listURL := "https://firefox.settings.services.mozilla.com/v1/buckets/blocklists/collections/certificates/records"
+	urlPtr := flag.String("url", "https://firefox.settings.services.mozilla.com/v1/buckets/blocklists/collections/certificates/records", "The URL of the blocklist record data")
+	flag.Parse()
 	res := new(Results)
-	getJSON(listURL, res)
+	getJSON(*urlPtr, res)
 	for idx := range res.Data {
 		IssuerName := res.Data[idx].IssuerName
 		rawIssuer, _ := base64.StdEncoding.DecodeString(IssuerName)
