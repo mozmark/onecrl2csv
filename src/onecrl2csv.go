@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -23,15 +25,19 @@ func getJSON(url string, target interface{}) error {
 	return json.NewDecoder(r.Body).Decode(target)
 }
 
-func hexify(arr []byte) string {
+func hexify(arr []byte, separate bool, upperCase bool) string {
 	var encoded bytes.Buffer
 	for i := 0; i < len(arr); i++ {
 		encoded.WriteString(strings.ToUpper(hex.EncodeToString(arr[i : i+1])))
-		if i < len(arr)-1 {
+		if i < len(arr)-1 && separate {
 			encoded.WriteString(":")
 		}
 	}
-	return encoded.String()
+	retval := encoded.String()
+	if !upperCase {
+		retval = strings.ToLower(retval)
+	}
+	return retval;
 }
 
 type Results struct {
@@ -81,25 +87,93 @@ func rfc4514ish(rdns *pkix.RDNSequence) string {
 	return retval
 }
 
+func decodeDN(name string) (string, error) {
+	rawDN, _ := base64.StdEncoding.DecodeString(name)
+	rdns := new(pkix.RDNSequence)
+	_, err := asn1.Unmarshal(rawDN, rdns)
+	if nil != err {
+		fmt.Printf("problem decoding %s\n", name);
+		//return "", err
+	}
+	
+	return rfc4514ish(rdns), err
+}
+
+func decodeSerial(encoded string, separate bool, upper bool) (string, error) {
+	rawSerial, err := base64.StdEncoding.DecodeString(encoded)
+	return hexify(rawSerial, separate, upper), err
+}
+
+func getRevocationsTxt(filename string, separate bool, upper bool) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var dn = ""
+	for scanner.Scan() {
+		// process line
+		line := scanner.Text()
+		// Ignore comments
+		if 0 == strings.Index(line, "#") {
+			continue
+		}
+		if 0 == strings.Index(line, " ") {
+			if len(dn) == 0 {
+				log.Fatal("A serial number with no issuer is not valid. Exiting.")
+			}
+			issuer, err2 := decodeDN(dn)
+			if nil != err2 {
+				log.Print(err2)
+			}
+			
+			serial, err3 := decodeSerial(strings.Trim(line, " "), separate, upper)
+			if nil != err3 {
+				log.Print(err3)
+			}
+			fmt.Printf("\"%s\",\"%s\"\n", issuer, serial);
+			continue
+		}
+		if 0 == strings.Index(line, "\t") {
+			log.Fatal("revocations.txt containing subject / pubkey pairs not yet supported");
+			log.Fatal("A public key hash with no subject is not valid. Exiting.")
+		}
+		dn = line
+	}
+	
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+	}
+
+	return nil;
+}
+
 func main() {
 	urlPtr := flag.String("url", "https://firefox.settings.services.mozilla.com/v1/buckets/blocklists/collections/certificates/records", "The URL of the blocklist record data")
+	filePtr := flag.String("file", "", "revocations.txt to load entries from");
+	upper := flag.Bool("upper", false, "Should hex values be upper case?")
+	separate := flag.Bool("separate", false, "Should the serial number bytes be colon separated?")
 	flag.Parse()
 	res := new(Results)
-	getJSON(*urlPtr, res)
+	// If no file is specificied, fall back to loading from an URL
+	if len(*filePtr) == 0 {
+		getJSON(*urlPtr, res)
+	} else {
+		getRevocationsTxt(*filePtr, *separate, *upper)
+	}
 	for idx := range res.Data {
 		IssuerName := res.Data[idx].IssuerName
-		rawIssuer, _ := base64.StdEncoding.DecodeString(IssuerName)
-		rdns := new(pkix.RDNSequence)
-		_, err3 := asn1.Unmarshal(rawIssuer, rdns)
-		if nil != err3 {
-			log.Print(err3)
-		}
 		SerialNumber := res.Data[idx].SerialNumber
-		rawSerial, err2 := base64.StdEncoding.DecodeString(SerialNumber)
+		hexSerial, err2 := decodeSerial(SerialNumber, *separate, *upper)
 		if nil != err2 {
 			log.Print(err2)
 		}
-		hexSerial := hexify(rawSerial)
-		fmt.Printf("\"%s\",\"%s\"\n", rfc4514ish(rdns), hexSerial)
+		decodedIssuer, err3 := decodeDN(IssuerName)
+		if err3 != nil {
+			log.Print(err3)
+		}
+		fmt.Printf("\"%s\",\"%s\"\n", decodedIssuer, hexSerial)
 	}
 }
